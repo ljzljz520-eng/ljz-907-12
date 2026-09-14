@@ -14,7 +14,7 @@ class MovieController extends Controller
         $perPage = $request->input('per_page', 18);
         $search = $request->input('search');
 
-        $query = Movie::query();
+        $query = Movie::query()->published();
 
         if ($search) {
             $query->where(function($q) use ($search) {
@@ -33,11 +33,71 @@ class MovieController extends Controller
 
     public function show($id)
     {
-        $movie = Movie::find($id);
+        // 已下架影片与不存在的影片一样返回 404，不对外公开
+        $movie = Movie::published()->find($id);
         if (!$movie) {
             return response()->json(['error' => 'Movie not found'], 404);
         }
-        return response()->json($movie);
+
+        return response()->json([
+            'movie' => $movie,
+            'related' => $this->relatedMovies($movie, 6),
+        ]);
+    }
+
+    /**
+     * 相关推荐：优先同类型，其次同年代，仍不足时补充其他热门已上架影片。
+     * 只返回列表展示所需的精简字段。
+     */
+    private function relatedMovies(Movie $movie, int $limit = 6)
+    {
+        $listFields = [
+            'id', 'title', 'translated_title', 'year', 'genre',
+            'rating', 'poster_url', 'director',
+        ];
+
+        $related = collect();
+
+        // 1) 同类型（取第一个分类标签匹配）
+        $genre = $movie->genre ? trim(explode(',', $movie->genre)[0]) : null;
+        if ($genre !== null && $genre !== '') {
+            $related = Movie::published()
+                ->where('id', '!=', $movie->id)
+                ->where(function ($q) use ($genre) {
+                    $q->where('genre', 'like', "%{$genre}%");
+                })
+                ->orderByDesc('rating')
+                ->orderByDesc('year')
+                ->limit($limit)
+                ->get($listFields);
+        }
+
+        // 2) 同年代补充（前后 5 年）
+        if ($related->count() < $limit) {
+            $excludeIds = $related->pluck('id')->push($movie->id)->all();
+            $extra = Movie::published()
+                ->whereNotIn('id', $excludeIds)
+                ->whereBetween('year', [$movie->year - 5, $movie->year + 5])
+                ->orderByDesc('rating')
+                ->orderByDesc('year')
+                ->limit($limit - $related->count())
+                ->get($listFields);
+            $related = $related->concat($extra);
+        }
+
+        // 3) 仍不足则用最新上架的影片补齐
+        if ($related->count() < $limit) {
+            $excludeIds = $related->pluck('id')->push($movie->id)->all();
+            $extra = Movie::published()
+                ->whereNotIn('id', $excludeIds)
+                ->orderByDesc('created_at')
+                ->orderByDesc('id')
+                ->limit($limit - $related->count())
+                ->get($listFields);
+            $related = $related->concat($extra);
+        }
+
+        return $related->values();
     }
 
     public function upload(Request $request)
@@ -79,27 +139,30 @@ class MovieController extends Controller
             return strtolower(trim($h));
         }, $header);
 
-        // Required columns mapping (flexible matching)
+        // Required columns mapping (flexible matching, supports aliases)
         $map = [
-            'title' => array_search('title', $header),
-            'translated_title' => array_search('translated_title', $header),
-            'year' => array_search('year', $header),
-            'director' => array_search('director', $header),
-            'writer' => array_search('writer', $header),
-            'actors' => array_search('actors', $header),
-            'release_date' => array_search('release_date', $header),
-            'country' => array_search('country', $header),
-            'language' => array_search('language', $header),
-            'runtime' => array_search('runtime', $header),
-            'genre' => array_search('genre', $header),
-            'rating' => array_search('rating', $header),
-            'imdb_rating' => array_search('imdb_rating', $header),
-            'imdb_link' => array_search('imdb_link', $header),
-            'douban_link' => array_search('douban_link', $header),
-            'poster_url' => array_search('poster_url', $header),
-            'description' => array_search('description', $header),
-            'awards' => array_search('awards', $header),
-            'screenshots' => array_search('screenshots', $header),
+            'title' => $this->findColumn($header, ['title']),
+            'translated_title' => $this->findColumn($header, ['translated_title']),
+            'year' => $this->findColumn($header, ['year']),
+            'director' => $this->findColumn($header, ['director']),
+            'writer' => $this->findColumn($header, ['writer']),
+            'actors' => $this->findColumn($header, ['actors']),
+            'release_date' => $this->findColumn($header, ['release_date']),
+            'country' => $this->findColumn($header, ['country']),
+            'language' => $this->findColumn($header, ['language']),
+            'runtime' => $this->findColumn($header, ['runtime']),
+            'genre' => $this->findColumn($header, ['genre']),
+            'rating' => $this->findColumn($header, ['rating']),
+            'imdb_rating' => $this->findColumn($header, ['imdb_rating']),
+            'imdb_link' => $this->findColumn($header, ['imdb_link']),
+            'douban_link' => $this->findColumn($header, ['douban_link']),
+            'poster_url' => $this->findColumn($header, ['poster_url']),
+            'description' => $this->findColumn($header, ['description']),
+            'awards' => $this->findColumn($header, ['awards']),
+            'screenshots' => $this->findColumn($header, ['screenshots']),
+            'target_audience' => $this->findColumn($header, ['target_audience', 'audience', 'suitable_audience']),
+            'source_organization' => $this->findColumn($header, ['source_organization', 'source', 'provider', 'organization']),
+            'is_published' => $this->findColumn($header, ['is_published', 'published', 'status']),
         ];
 
         if ($map['title'] === false || $map['year'] === false) {
@@ -173,6 +236,11 @@ class MovieController extends Controller
                         'description' => $this->cleanField(($map['description'] !== false && isset($row[$map['description']])) ? $row[$map['description']] : null, null),
                         'awards' => $this->cleanField(($map['awards'] !== false && isset($row[$map['awards']])) ? $row[$map['awards']] : null, null),
                         'screenshots' => ($map['screenshots'] !== false && isset($row[$map['screenshots']])) ? explode(',', $row[$map['screenshots']]) : null,
+                        'target_audience' => $this->cleanField(($map['target_audience'] !== false && isset($row[$map['target_audience']])) ? $row[$map['target_audience']] : null, 255),
+                        'source_organization' => $this->cleanField(($map['source_organization'] !== false && isset($row[$map['source_organization']])) ? $row[$map['source_organization']] : null, 255),
+                        'is_published' => ($map['is_published'] !== false && isset($row[$map['is_published']]))
+                            ? $this->parsePublished($row[$map['is_published']])
+                            : true,
                     ];
 
                     Movie::updateOrCreate(
@@ -209,6 +277,36 @@ class MovieController extends Controller
             'failed' => $errorCount,
             'errors' => $cleanedErrors
         ]);
+    }
+
+    /**
+     * 在表头中查找第一个匹配的列名（支持多个别名）
+     */
+    private function findColumn(array $header, array $aliases)
+    {
+        foreach ($aliases as $alias) {
+            $pos = array_search($alias, $header, true);
+            if ($pos !== false) {
+                return $pos;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 解析上架状态：空值默认为上架；下架/0/false/no/offline 等视为下架
+     */
+    private function parsePublished($value)
+    {
+        if ($value === null) {
+            return true;
+        }
+        $value = strtolower(trim((string) $value));
+        if ($value === '') {
+            return true;
+        }
+        $offline = ['0', 'offline', 'false', 'no', '下架', '未上架', '停用'];
+        return !in_array($value, $offline, true);
     }
 
     /**

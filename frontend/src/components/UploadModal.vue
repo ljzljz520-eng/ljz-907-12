@@ -2,7 +2,7 @@
 import { ref } from 'vue';
 import { Dialog, DialogPanel, DialogTitle, TransitionRoot, TransitionChild } from '@headlessui/vue';
 import { Upload, X, FileText, CheckCircle, AlertCircle } from 'lucide-vue-next';
-import axios from 'axios';
+import api from '../lib/api';
 
 const props = defineProps({
   isOpen: Boolean
@@ -49,7 +49,7 @@ const upload = async () => {
 
   try {
     // API Call
-    const response = await axios.post('http://localhost:8000/api/upload', formData, {
+    const response = await api.post('/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: (progressEvent) => {
         progress.value = Math.round((progressEvent.loaded * 100) / progressEvent.total);
